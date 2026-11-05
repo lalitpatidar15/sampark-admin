@@ -9,23 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, isStaffRole, unwrap, type Session, type SessionUser } from "./api";
-
-/**
- * Staff session handling.
- *
- * The access token is held in memory and mirrored into sessionStorage purely so
- * a page refresh does not force a re-login. It is deliberately not put in a
- * long-lived cookie or localStorage: a token in localStorage survives logout on
- * the device and is readable by any injected script.
- *
- * Known limitation: because the API issues bearer tokens rather than setting an
- * httpOnly cookie, this token is reachable by JavaScript and a successful XSS
- * would be able to exfiltrate a staff session. Before production, move staff auth
- * to an httpOnly, SameSite=Strict cookie set by this app as a BFF and add CSRF
- * protection. See README "Security notes".
- */
-const STORAGE_KEY = "sampark.admin.session";
+import { isStaffRole, type SessionUser } from "./api";
 
 interface AuthState {
   user: SessionUser | null;
@@ -46,76 +30,78 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 const emptyState: AuthState = { user: null, permissions: [], accessToken: null, ready: false };
 
+async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options?.headers || {}),
+    },
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>(emptyState);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const raw = window.sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      setState({ ...emptyState, ready: true });
-      return;
-    }
+  const loadSession = useCallback(async () => {
     try {
-      const saved = JSON.parse(raw) as { session: Session };
-      // A non-staff token must never reach the console, even if one was
-      // somehow stored by an earlier session on the same browser.
-      if (!isStaffRole(saved.session.user.role)) {
-        window.sessionStorage.removeItem(STORAGE_KEY);
+      const data = await fetchJson<{ user: SessionUser | null; permissions: string[] }>('/api/auth/me');
+      if (data.user && isStaffRole(data.user.role) && data.user.status === 'ACTIVE') {
+        setState({ user: data.user, permissions: data.permissions, accessToken: null, ready: true });
+      } else {
         setState({ ...emptyState, ready: true });
-        return;
       }
-      setState({
-        user: saved.session.user,
-        permissions: saved.session.permissions,
-        accessToken: saved.session.accessToken,
-        ready: true,
-      });
     } catch {
-      window.sessionStorage.removeItem(STORAGE_KEY);
       setState({ ...emptyState, ready: true });
     }
   }, []);
 
+  useEffect(() => {
+    loadSession();
+  }, [loadSession]);
+
   const requestOtp = useCallback(async (phone: string) => {
     setError(null);
-    const result = await api.post<{ devCode?: string; resendAfterSeconds: number }>(
-      "/auth/otp/request",
-      { phone, purpose: "LOGIN" },
-    );
-    return unwrap(result);
+    const result = await fetchJson<{ devCode?: string; resendAfterSeconds: number }>('/api/auth/otp', {
+      method: 'POST',
+      body: JSON.stringify({ phone, purpose: 'LOGIN' }),
+    });
+    return result;
   }, []);
 
   const verifyOtp = useCallback(async (phone: string, code: string) => {
     setError(null);
     try {
-      const result = await api.post<Session>("/auth/login", { phone, code });
-      const session = unwrap(result);
-
-      if (!isStaffRole(session.user.role)) {
-        setError("This account is not a staff account. Use the owner mobile app instead.");
-        return;
-      }
-      if (session.user.status !== "ACTIVE") {
-        setError("This staff account is not active. Contact a super admin.");
-        return;
-      }
-
-      window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ session }));
-      setState({
-        user: session.user,
-        permissions: session.permissions,
-        accessToken: session.accessToken,
-        ready: true,
+      const result = await fetchJson<{ user: SessionUser; permissions: string[]; accessToken: string }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ phone, code }),
       });
+
+      if (!isStaffRole(result.user.role)) {
+        setError('This account is not a staff account. Use the owner mobile app instead.');
+        return;
+      }
+      if (result.user.status !== 'ACTIVE') {
+        setError('This staff account is not active. Contact a super admin.');
+        return;
+      }
+
+      setState({ user: result.user, permissions: result.permissions, accessToken: result.accessToken, ready: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign in failed");
+      setError(err instanceof Error ? err.message : 'Sign in failed');
       throw err;
     }
   }, []);
 
-  const logout = useCallback(() => {
-    window.sessionStorage.removeItem(STORAGE_KEY);
+  const logout = useCallback(async () => {
+    await fetchJson('/api/auth/logout', { method: 'POST' });
     setState({ ...emptyState, ready: true });
   }, []);
 
@@ -134,6 +120,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
-  if (!context) throw new Error("useAuth must be used inside an AuthProvider");
+  if (!context) throw new Error('useAuth must be used inside an AuthProvider');
   return context;
 }

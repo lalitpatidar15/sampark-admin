@@ -77,6 +77,17 @@ export const api = {
     request<{ data: T }>(path, { method: "PATCH", body: JSON.stringify(body ?? {}), token }),
   delete: <T>(path: string, token?: string | null) =>
     request<{ data: T }>(path, { method: "DELETE", token }),
+
+  /** Create an authenticated API client with a bearer token. */
+  withAuth: (token: string | null | undefined) => ({
+    get: <T>(path: string) => request<{ data: T }>(path, { method: "GET", token }),
+    post: <T>(path: string, body?: unknown) =>
+      request<{ data: T }>(path, { method: "POST", body: JSON.stringify(body ?? {}), token }),
+    patch: <T>(path: string, body?: unknown) =>
+      request<{ data: T }>(path, { method: "PATCH", body: JSON.stringify(body ?? {}), token }),
+    delete: <T>(path: string) =>
+      request<{ data: T }>(path, { method: "DELETE", token }),
+  }),
 };
 
 export const unwrap = <T>(result: { data: T }): T => result.data;
